@@ -12,6 +12,7 @@ use anyhow::anyhow;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use log::error;
+use molerat::Molerat;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{io, thread};
@@ -61,9 +62,16 @@ pub enum Msg {
     LeftTabsInFocus { reset_to: Option<props::Direction> },
     RightTabsInFocus { reset_to: Option<props::Direction> },
     SwitchUI,
+    ContinueDebugee,
+    RunDebugee,
+    StepOver,
+    StepInto,
+    StepOut,
     BreakpointAdd(BreakpointsAddType),
     UpdateBreakpointList,
     ExpandTab(Id),
+    SelectTab { tab_id: Id, index: usize },
+    SelectOracle(usize),
 
     PopupConfirmDebuggerRestart,
     PopupBreakpoint(BreakpointViewOwned),
@@ -74,6 +82,7 @@ pub enum Msg {
     PopupNo(ConfirmedAction),
 
     Input(String),
+    SetInput(Option<String>),
     InputCancel,
 }
 
@@ -176,11 +185,14 @@ impl TuiApplication {
                 client_exchanger,
                 log_buffer,
             )?;
+            let mut molerat = Molerat::<Msg>::new_mcp("BugStalker debugger")?;
+            model.publish(&mut molerat);
             model.terminal.enter_alternate_screen()?;
             model.terminal.enable_raw_mode()?;
             weak_error!(execute!(io::stdout(), DisableMouseCapture));
 
             while !model.quit {
+                let mut changed = false;
                 match model.app.tick(PollStrategy::Once) {
                     Err(err) => {
                         model.app.attr(
@@ -200,6 +212,7 @@ impl TuiApplication {
                     Ok(messages) if !messages.is_empty() => {
                         // NOTE: redraw if at least one msg has been processed
                         model.redraw = true;
+                        changed = true;
                         for msg in messages.into_iter() {
                             let mut msg = Some(msg);
                             while msg.is_some() {
@@ -210,6 +223,21 @@ impl TuiApplication {
                         }
                     }
                     _ => {}
+                }
+                let molerat_messages = molerat.messages().collect::<Vec<_>>();
+                if !molerat_messages.is_empty() {
+                    changed = true;
+                    for msg in molerat_messages {
+                        let mut msg = Some(msg);
+                        while msg.is_some() {
+                            msg = model.update(msg).unwrap_or_else(|e| {
+                                Some(Msg::ShowOkPopup(Some("Error".to_string()), e.to_string()))
+                            });
+                        }
+                    }
+                }
+                if changed && !model.quit {
+                    model.publish(&mut molerat);
                 }
                 // Redraw
                 if model.redraw {

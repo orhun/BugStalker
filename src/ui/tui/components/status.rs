@@ -138,7 +138,11 @@ impl MockComponent for Status {
     }
 
     fn query(&self, attr: Attribute) -> Option<AttrValue> {
-        self.component.query(attr)
+        if attr == Attribute::Text {
+            self.component.children[1].query(attr)
+        } else {
+            self.component.query(attr)
+        }
     }
 
     fn attr(&mut self, attr: Attribute, value: AttrValue) {

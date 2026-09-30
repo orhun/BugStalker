@@ -9,6 +9,7 @@ use crate::ui::syntax::StylizedLine;
 use crate::ui::tui::app::port::UserEvent;
 use crate::ui::tui::config::CommonAction;
 use crate::ui::tui::utils::syntect::into_text_span;
+use crate::ui::tui::utils::tab::TabWindow;
 use crate::ui::tui::{Id, Msg};
 use crate::ui::{command, syntax};
 use nix::sys::signal::Signal;
@@ -21,6 +22,15 @@ use tuirealm::ratatui::style::{Color, Style};
 use tuirealm::{
     AttrValue, Attribute, Component, Event, MockComponent, Sub, SubClause, SubEventClause,
 };
+
+fn semantic_tree_rows(node: &Node<Vec<TextSpan>>, depth: usize, rows: &mut Vec<Vec<TextSpan>>) {
+    let mut row = vec![TextSpan::new("  ".repeat(depth))];
+    row.extend(node.value().iter().cloned());
+    rows.push(row);
+    for child in node.children() {
+        semantic_tree_rows(child, depth + 1, rows);
+    }
+}
 
 const MAX_RECURSION: u32 = 15;
 
@@ -343,6 +353,12 @@ impl Variables {
         root.add_child(args_node);
         root.add_child(vars_node);
 
+        let mut semantic_rows = Vec::new();
+        semantic_tree_rows(&root, 0, &mut semantic_rows);
+        self.component.attr(
+            TabWindow::SEMANTIC_CONTENT_ATTR,
+            AttrValue::Table(semantic_rows),
+        );
         self.component.set_tree(Tree::new(root));
         if vars_count != 0 {
             self.component.attr(

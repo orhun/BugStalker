@@ -38,14 +38,14 @@ fn start_bs_stdio_dap(debugee: &str) -> anyhow::Result<StdioDAP> {
         }
     }
     Ok(StdioDAP {
-        child,
+        _child: child,
         stdin: Box::new(stdin),
         reader: BufReader::new(stdout),
     })
 }
 
 pub struct StdioDAP {
-    child: Child,
+    _child: Child,
     stdin: Box<dyn Write + Send>,
     reader: BufReader<std::process::ChildStdout>,
 }

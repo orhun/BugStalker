@@ -496,6 +496,7 @@ pub mod tui {
     use crate::ui::tui::app::port::UserEvent;
     use crate::ui::tui::config::CommonAction;
     use crate::ui::tui::config::KeyMap;
+    use crate::ui::tui::utils::tab::TabWindow;
     use chrono::{DateTime, Local, Timelike};
     use std::collections::VecDeque;
     use std::sync::Arc;
@@ -605,14 +606,16 @@ pub mod tui {
                     ),
                 ]);
 
-            Self {
+            let mut this = Self {
                 component: container,
                 keymap,
                 oracle,
                 count_history: VecDeque::from(
                     [(Local::now(), SPARKLINE_DEFAULT_LVL); SPARKLINE_LEN],
                 ),
-            }
+            };
+            this.refresh_table();
+            this
         }
 
         fn active_task_count(&self) -> usize {
@@ -680,9 +683,26 @@ pub mod tui {
                     .add_row();
             }
 
-            self.component.children[0].attr(
-                Attribute::Content,
-                AttrValue::Table(tasks_table_builder.build()),
+            let tasks_table = tasks_table_builder.build();
+            self.component.children[0]
+                .attr(Attribute::Content, AttrValue::Table(tasks_table.clone()));
+
+            let mut semantic_table = vec![vec![
+                TextSpan::from("Task ID"),
+                TextSpan::from("State"),
+                TextSpan::from("Time"),
+                TextSpan::from("Target"),
+                TextSpan::from("Caller"),
+                TextSpan::from("Polls"),
+            ]];
+            semantic_table.extend(tasks_table);
+            semantic_table.push(vec![TextSpan::from(format!(
+                "Active task count: {}",
+                self.active_task_count()
+            ))]);
+            self.component.attr(
+                TabWindow::SEMANTIC_CONTENT_ATTR,
+                AttrValue::Table(semantic_table),
             );
 
             let back = self.count_history.front();

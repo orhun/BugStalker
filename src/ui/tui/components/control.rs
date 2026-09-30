@@ -1,13 +1,9 @@
-use crate::debugger::Error;
 use crate::debugger::register::debug::BreakCondition;
 use crate::ui;
-use crate::ui::command;
-use crate::ui::command::{CommandError, run};
 use crate::ui::proto::ClientExchanger;
 use crate::ui::tui::app::port::UserEvent;
 use crate::ui::tui::config::SpecialAction;
 use crate::ui::tui::{Id, Msg};
-use log::warn;
 use nix::sys::signal;
 use nix::sys::signal::Signal;
 use nix::unistd::Pid;
@@ -139,93 +135,11 @@ impl Component<Msg, UserEvent> for GlobalControl {
                         SpecialAction::FocusRightWindow => Msg::RightTabsInFocus { reset_to: None },
                         SpecialAction::SwitchUI => Msg::SwitchUI,
                         SpecialAction::CloseApp => Msg::AppClose,
-                        SpecialAction::ContinueDebugee => {
-                            if !self.exchanger.is_messaging_enabled() {
-                                warn!(target: "tui", "try continue but messaging disabled");
-                                return None;
-                            }
-
-                            self.exchanger
-                                .request_async(|dbg| {
-                                    Ok(command::r#continue::Handler::new(dbg).handle()?)
-                                })
-                                .expect("messaging enabled");
-
-                            self.exchanger.disable_messaging();
-                            Msg::AppRunning
-                        }
-                        SpecialAction::RunDebugee => {
-                            if !self.exchanger.is_messaging_enabled() {
-                                warn!(target: "tui", "try start/restart but messaging disabled");
-                                return None;
-                            }
-
-                            let mb_err = self
-                                .exchanger
-                                .request_sync(|dbg| {
-                                    run::Handler::new(dbg).handle(run::Command::DryStart)
-                                })
-                                .expect("messaging enabled");
-
-                            let already_run = matches!(
-                                mb_err.err(),
-                                Some(CommandError::Handle(Error::AlreadyRun))
-                            );
-
-                            if already_run {
-                                Msg::PopupConfirmDebuggerRestart
-                            } else {
-                                self.exchanger
-                                    .request_async(|dbg| {
-                                        Ok(run::Handler::new(dbg).handle(run::Command::Start)?)
-                                    })
-                                    .expect("messaging enabled");
-                                self.exchanger.disable_messaging();
-                                Msg::AppRunning
-                            }
-                        }
-                        SpecialAction::StepOver => {
-                            if !self.exchanger.is_messaging_enabled() {
-                                warn!(target: "tui", "try step-over but messaging disabled");
-                                return None;
-                            }
-
-                            self.exchanger
-                                .request_async(|dbg| {
-                                    Ok(command::step_over::Handler::new(dbg).handle()?)
-                                })
-                                .expect("messaging enabled");
-
-                            Msg::AppRunning
-                        }
-                        SpecialAction::StepInto => {
-                            if !self.exchanger.is_messaging_enabled() {
-                                warn!(target: "tui", "try step-into but messaging disabled");
-                                return None;
-                            }
-
-                            self.exchanger
-                                .request_async(|dbg| {
-                                    Ok(command::step_into::Handler::new(dbg).handle()?)
-                                })
-                                .expect("messaging enabled");
-
-                            Msg::AppRunning
-                        }
-                        SpecialAction::StepOut => {
-                            if !self.exchanger.is_messaging_enabled() {
-                                warn!(target: "tui", "try step-out but messaging disabled");
-                                return None;
-                            }
-
-                            self.exchanger
-                                .request_async(|dbg| {
-                                    Ok(command::step_out::Handler::new(dbg).handle()?)
-                                })
-                                .expect("messaging enabled");
-
-                            Msg::AppRunning
-                        }
+                        SpecialAction::ContinueDebugee => Msg::ContinueDebugee,
+                        SpecialAction::RunDebugee => Msg::RunDebugee,
+                        SpecialAction::StepOver => Msg::StepOver,
+                        SpecialAction::StepInto => Msg::StepInto,
+                        SpecialAction::StepOut => Msg::StepOut,
                         _ => Msg::None,
                     }
                 } else {

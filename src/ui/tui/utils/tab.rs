@@ -102,6 +102,18 @@ impl TabWindow {
     pub const VIEW_SIZE_ATTR: Attribute = Attribute::Custom("VIEW_SIZE");
     pub const RESET_CHOICE_ATTR: Attribute = Attribute::Custom("RESET_CHOICE");
     pub const ACTIVATE_TAB: Attribute = Attribute::Custom("ACTIVATE_TAB");
+    pub const SELECT_TAB_ATTR: Attribute = Attribute::Custom("SELECT_TAB");
+    pub const TAB_LABELS_ATTR: Attribute = Attribute::Custom("TAB_LABELS");
+    pub const SELECTED_TAB_ATTR: Attribute = Attribute::Custom("SELECTED_TAB");
+    pub const ACTIVE_TAB_ATTR: Attribute = Attribute::Custom("ACTIVE_TAB");
+    pub const VISIBLE_TITLE_ATTR: Attribute = Attribute::Custom("VISIBLE_TITLE");
+    pub const VISIBLE_TEXT_ATTR: Attribute = Attribute::Custom("VISIBLE_TEXT");
+    pub const VISIBLE_CONTENT_ATTR: Attribute = Attribute::Custom("VISIBLE_CONTENT");
+    pub const VISIBLE_SEMANTIC_ATTR: Attribute = Attribute::Custom("VISIBLE_SEMANTIC");
+    pub const SEMANTIC_CONTENT_ATTR: Attribute = Attribute::Custom("MOLERAT_CONTENT");
+    pub const VISIBLE_TAB_LABELS_ATTR: Attribute = Attribute::Custom("VISIBLE_TAB_LABELS");
+    pub const VISIBLE_SELECTED_TAB_ATTR: Attribute = Attribute::Custom("VISIBLE_SELECTED_TAB");
+    pub const SELECT_VISIBLE_TAB_ATTR: Attribute = Attribute::Custom("SELECT_VISIBLE_TAB");
 
     pub fn foreground(mut self, fg: Color) -> Self {
         self.attr(Attribute::Foreground, AttrValue::Color(fg));
@@ -207,7 +219,46 @@ impl MockComponent for TabWindow {
     }
 
     fn query(&self, attr: Attribute) -> Option<AttrValue> {
-        self.props.get(attr)
+        match attr {
+            Self::TAB_LABELS_ATTR => Some(AttrValue::Payload(PropPayload::Vec(
+                self.choices
+                    .states
+                    .choices
+                    .iter()
+                    .cloned()
+                    .map(PropValue::Str)
+                    .collect(),
+            ))),
+            Self::SELECTED_TAB_ATTR => Some(AttrValue::Payload(PropPayload::One(
+                PropValue::Usize(self.choices.states.choice),
+            ))),
+            Self::ACTIVE_TAB_ATTR => self
+                .active_idx
+                .map(|index| AttrValue::Payload(PropPayload::One(PropValue::Usize(index)))),
+            Self::VISIBLE_TITLE_ATTR => self
+                .visible_window()
+                .and_then(|window| window.query(Attribute::Title)),
+            Self::VISIBLE_TEXT_ATTR => self
+                .visible_window()
+                .and_then(|window| window.query(Attribute::Text)),
+            Self::VISIBLE_CONTENT_ATTR => self
+                .visible_window()
+                .and_then(|window| window.query(Attribute::Content)),
+            Self::VISIBLE_SEMANTIC_ATTR => self.visible_window().and_then(|window| {
+                window
+                    .query(Self::SEMANTIC_CONTENT_ATTR)
+                    .or_else(|| window.query(Self::VISIBLE_SEMANTIC_ATTR))
+                    .or_else(|| window.query(Attribute::Text))
+                    .or_else(|| window.query(Attribute::Content))
+            }),
+            Self::VISIBLE_TAB_LABELS_ATTR => self
+                .visible_window()
+                .and_then(|window| window.query(Self::TAB_LABELS_ATTR)),
+            Self::VISIBLE_SELECTED_TAB_ATTR => self
+                .visible_window()
+                .and_then(|window| window.query(Self::SELECTED_TAB_ATTR)),
+            _ => self.props.get(attr),
+        }
     }
 
     fn attr(&mut self, attr: Attribute, value: AttrValue) {
@@ -249,6 +300,16 @@ impl MockComponent for TabWindow {
                 if let CmdResult::Submit(state) = res {
                     let tab_idx = state.unwrap_one().unwrap_usize();
                     self.set_active_idx(tab_idx);
+                }
+            }
+            Self::SELECT_TAB_ATTR => {
+                let index = value.unwrap_payload().unwrap_one().unwrap_usize();
+                self.choices.states.select(index);
+                self.set_active_idx(index);
+            }
+            Self::SELECT_VISIBLE_TAB_ATTR => {
+                if let Some(window) = self.visible_window_mut() {
+                    window.attr(Self::SELECT_TAB_ATTR, value);
                 }
             }
             Attribute::Custom(_) => {

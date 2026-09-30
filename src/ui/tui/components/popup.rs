@@ -170,6 +170,7 @@ impl MockComponent for Popup {
                 self.mode = OpMode::YesNo;
             }
 
+            self.props.set(attr, value.clone());
             return self.buttons.attr(attr, value);
         }
 
@@ -232,5 +233,20 @@ impl Component<Msg, UserEvent> for Popup {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exposes_confirmation_buttons_through_content_query() {
+        let mut popup = Popup::default();
+        let (attr, value) = Popup::yes_no_attrs(YesNoLabels::new("yes", "no"));
+
+        popup.attr(attr, value.clone());
+
+        assert_eq!(popup.query(Attribute::Content), Some(value));
     }
 }

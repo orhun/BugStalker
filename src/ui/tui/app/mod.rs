@@ -27,6 +27,8 @@ use crate::ui::tui::utils::tab::TabWindow;
 use anyhow::anyhow;
 use chumsky::Parser;
 use log::warn;
+use molerat::Molerat;
+use molerat::accesskit::{Action, ActionData, Role};
 use std::borrow::Cow;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -42,6 +44,87 @@ use tuirealm::{
 };
 
 use super::{BreakpointsAddType, ConfirmedAction, DebugeeStreamBuffer, Id, Msg};
+
+#[derive(Default)]
+struct TabSemanticState {
+    labels: Vec<String>,
+    selected: usize,
+    active: Option<usize>,
+    title: String,
+    rows: Vec<Vec<String>>,
+    nested_labels: Vec<String>,
+    nested_selected: Option<usize>,
+}
+
+fn prop_value_text(value: &PropValue) -> Option<String> {
+    match value {
+        PropValue::Str(value) => Some(value.clone()),
+        PropValue::TextSpan(value) => Some(value.content.to_string()),
+        PropValue::Bool(value) => Some(value.to_string()),
+        PropValue::U8(value) => Some(value.to_string()),
+        PropValue::U16(value) => Some(value.to_string()),
+        PropValue::U32(value) => Some(value.to_string()),
+        PropValue::U64(value) => Some(value.to_string()),
+        PropValue::U128(value) => Some(value.to_string()),
+        PropValue::Usize(value) => Some(value.to_string()),
+        PropValue::I8(value) => Some(value.to_string()),
+        PropValue::I16(value) => Some(value.to_string()),
+        PropValue::I32(value) => Some(value.to_string()),
+        PropValue::I64(value) => Some(value.to_string()),
+        PropValue::I128(value) => Some(value.to_string()),
+        PropValue::Isize(value) => Some(value.to_string()),
+        PropValue::F32(value) => Some(value.to_string()),
+        PropValue::F64(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn payload_rows(payload: &PropPayload) -> Vec<Vec<String>> {
+    match payload {
+        PropPayload::One(value) => prop_value_text(value)
+            .map(|value| vec![vec![value]])
+            .unwrap_or_default(),
+        PropPayload::Vec(values) => values
+            .iter()
+            .filter_map(prop_value_text)
+            .map(|value| vec![value])
+            .collect(),
+        PropPayload::Linked(rows) => rows
+            .iter()
+            .map(|row| match row {
+                PropPayload::Vec(values) => values.iter().filter_map(prop_value_text).collect(),
+                other => payload_rows(other).into_iter().flatten().collect(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn attr_rows(value: Option<AttrValue>) -> Vec<Vec<String>> {
+    match value {
+        Some(AttrValue::String(value)) => vec![vec![value]],
+        Some(AttrValue::Text(value)) => vec![vec![value.content.to_string()]],
+        Some(AttrValue::Title((value, _))) => vec![vec![value]],
+        Some(AttrValue::Table(rows)) => rows
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|value| value.content.to_string())
+                    .collect()
+            })
+            .collect(),
+        Some(AttrValue::Payload(payload)) => payload_rows(&payload),
+        _ => Vec::new(),
+    }
+}
+
+fn first_attr_line(value: Option<AttrValue>) -> String {
+    attr_rows(value)
+        .into_iter()
+        .next()
+        .map(|row| row.concat())
+        .unwrap_or_default()
+}
 
 pub struct Model {
     /// Application
@@ -120,6 +203,336 @@ impl Model {
             if popup_in_focus {
                 self.app.view(&Id::Popup, f, f.area());
             }
+        });
+    }
+
+    fn query_attr(&self, id: &Id, attr: Attribute) -> Option<AttrValue> {
+        self.app.query(id, attr).ok().flatten()
+    }
+
+    fn tab_semantic_state(&self, id: &Id) -> TabSemanticState {
+        let labels = attr_rows(self.query_attr(id, TabWindow::TAB_LABELS_ATTR))
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let selected = self
+            .query_attr(id, TabWindow::SELECTED_TAB_ATTR)
+            .map(|value| value.unwrap_payload().unwrap_one().unwrap_usize())
+            .unwrap_or_default();
+        let active = self
+            .query_attr(id, TabWindow::ACTIVE_TAB_ATTR)
+            .map(|value| value.unwrap_payload().unwrap_one().unwrap_usize());
+        let title = first_attr_line(self.query_attr(id, TabWindow::VISIBLE_TITLE_ATTR));
+        let rows = attr_rows(self.query_attr(id, TabWindow::VISIBLE_SEMANTIC_ATTR));
+        let nested_labels = attr_rows(self.query_attr(id, TabWindow::VISIBLE_TAB_LABELS_ATTR))
+            .into_iter()
+            .flatten()
+            .collect();
+        let nested_selected = self
+            .query_attr(id, TabWindow::VISIBLE_SELECTED_TAB_ATTR)
+            .map(|value| value.unwrap_payload().unwrap_one().unwrap_usize());
+        TabSemanticState {
+            labels,
+            selected,
+            active,
+            title,
+            rows,
+            nested_labels,
+            nested_selected,
+        }
+    }
+
+    pub fn publish(&self, molerat: &mut Molerat<Msg>) {
+        const LEFT_KEYS: [&str; 3] = ["breakpoints", "variables", "threads"];
+        const RIGHT_KEYS: [&str; 5] = ["source", "output", "assembly", "oracles", "logs"];
+
+        let left = self.tab_semantic_state(&Id::LeftTabs);
+        let right = self.tab_semantic_state(&Id::RightTabs);
+        let focused = self.app.focus().cloned();
+        let process_status = first_attr_line(self.query_attr(&Id::Status, Attribute::Text));
+        let input_title = first_attr_line(self.query_attr(&Id::Input, Attribute::Title));
+        let input_value = first_attr_line(self.query_attr(&Id::Input, Attribute::Value));
+        let input_valid = self
+            .app
+            .state(&Id::Input)
+            .is_ok_and(|state| !matches!(state, tuirealm::State::None));
+        let popup_title = first_attr_line(self.query_attr(&Id::Popup, Attribute::Title));
+        let popup_text = first_attr_line(self.query_attr(&Id::Popup, Attribute::Text));
+        let popup_labels = attr_rows(self.query_attr(&Id::Popup, Attribute::Content))
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let popup_action = self
+            .query_attr(&Id::Popup, Attribute::Custom("action"))
+            .and_then(|value| value.as_string().cloned())
+            .and_then(|value| ConfirmedAction::from_str(&value).ok());
+        let debugger_ready = self.exchanger.is_messaging_enabled();
+
+        let breakpoints = debugger_ready
+            .then(|| {
+                self.exchanger.request_sync(|dbg| {
+                    let mut handler = r#break::Handler::new(dbg);
+                    let result = handler.handle(&r#break::Command::Info).expect("infallible");
+                    let r#break::ExecutionResult::Dump(breakpoints) = result else {
+                        unreachable!()
+                    };
+                    breakpoints
+                        .into_iter()
+                        .map(|breakpoint| breakpoint.to_owned())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .and_then(Result::ok)
+            .unwrap_or_default();
+        let watchpoints = debugger_ready
+            .then(|| {
+                self.exchanger.request_sync(|dbg| {
+                    let mut handler = watch::Handler::new(dbg);
+                    let result = handler.handle(watch::Command::Info).expect("infallible");
+                    let watch::ExecutionResult::Dump(watchpoints) = result else {
+                        unreachable!()
+                    };
+                    watchpoints
+                        .into_iter()
+                        .map(|watchpoint| watchpoint.to_owned())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .and_then(Result::ok)
+            .unwrap_or_default();
+
+        molerat.publish(|ui| {
+            ui.status(
+                "process-status",
+                if process_status.is_empty() {
+                    "Process state unavailable"
+                } else {
+                    &process_status
+                },
+            );
+
+            ui.container("left-tabs", Role::TabList, |ui| {
+                for (index, label) in left.labels.iter().enumerate() {
+                    let key = LEFT_KEYS.get(index).copied().unwrap_or("left-tab");
+                    let tab_id = Id::LeftTabs;
+                    ui.node(key, Role::Tab)
+                        .label(label)
+                        .selected(index == left.selected)
+                        .focused(
+                            focused == Some(Id::LeftTabs)
+                                && left.active.is_none()
+                                && index == left.selected,
+                        )
+                        .on_focus(move || Msg::SelectTab {
+                            tab_id: tab_id.clone(),
+                            index,
+                        })
+                        .on_click(move || Msg::SelectTab {
+                            tab_id: Id::LeftTabs,
+                            index,
+                        });
+                }
+            })
+            .label("Debugger data");
+
+            let left_title = left
+                .labels
+                .get(left.selected)
+                .cloned()
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| left.title.clone());
+            ui.container("left-panel", Role::TabPanel, |ui| {
+                if left.selected == 0 {
+                    ui.button("add-line-breakpoint", "Add breakpoint at file and line")
+                        .disabled(!debugger_ready)
+                        .on_click(|| Msg::BreakpointAdd(BreakpointsAddType::AtLine));
+                    ui.button("add-function-breakpoint", "Add breakpoint at function")
+                        .disabled(!debugger_ready)
+                        .on_click(|| Msg::BreakpointAdd(BreakpointsAddType::AtFunction));
+                    ui.button("add-address-breakpoint", "Add breakpoint at address")
+                        .disabled(!debugger_ready)
+                        .on_click(|| Msg::BreakpointAdd(BreakpointsAddType::AtAddress));
+                    ui.button("add-watchpoint", "Add watchpoint")
+                        .disabled(!debugger_ready)
+                        .on_click(|| Msg::BreakpointAdd(BreakpointsAddType::Watchpoint));
+                    ui.list_box("breakpoint-list", "Breakpoints", |ui| {
+                        for breakpoint in &breakpoints {
+                            let number = breakpoint.number;
+                            let label = breakpoint.place.as_ref().map_or_else(
+                                || format!("Breakpoint #{number} at {}", breakpoint.addr),
+                                |place| {
+                                    format!(
+                                        "Breakpoint #{number} at {}:{} ({})",
+                                        place.file.to_string_lossy(),
+                                        place.line_number,
+                                        breakpoint.addr
+                                    )
+                                },
+                            );
+                            let breakpoint = breakpoint.clone();
+                            ui.list_box_option(format!("breakpoint-{number}"), label)
+                                .on_click(move || Msg::PopupBreakpoint(breakpoint.clone()));
+                        }
+                    });
+                    ui.list_box("watchpoint-list", "Watchpoints", |ui| {
+                        for watchpoint in &watchpoints {
+                            let number = watchpoint.number;
+                            let target = watchpoint.source_dqe.as_ref().map_or_else(
+                                || format!("{}:{}", watchpoint.address, watchpoint.size),
+                                ToString::to_string,
+                            );
+                            let label = format!(
+                                "Watchpoint #{number} for {target} ({})",
+                                watchpoint.condition
+                            );
+                            let watchpoint = watchpoint.clone();
+                            ui.list_box_option(format!("watchpoint-{number}"), label)
+                                .on_click(move || Msg::PopupWatchpoint(watchpoint.clone()));
+                        }
+                    });
+                } else {
+                    ui.list("content", left_title.clone(), |ui| {
+                        for (index, row) in left.rows.iter().enumerate() {
+                            ui.list_item(index.to_string(), row.concat());
+                        }
+                    });
+                }
+            })
+            .label(left_title)
+            .focused(focused == Some(Id::LeftTabs) && left.active.is_some());
+
+            ui.container("right-tabs", Role::TabList, |ui| {
+                for (index, label) in right.labels.iter().enumerate() {
+                    let key = RIGHT_KEYS.get(index).copied().unwrap_or("right-tab");
+                    let tab_id = Id::RightTabs;
+                    ui.node(key, Role::Tab)
+                        .label(label)
+                        .selected(index == right.selected)
+                        .focused(
+                            focused == Some(Id::RightTabs)
+                                && right.active.is_none()
+                                && index == right.selected,
+                        )
+                        .on_focus(move || Msg::SelectTab {
+                            tab_id: tab_id.clone(),
+                            index,
+                        })
+                        .on_click(move || Msg::SelectTab {
+                            tab_id: Id::RightTabs,
+                            index,
+                        });
+                }
+            })
+            .label("Program view");
+
+            let right_title = right
+                .labels
+                .get(right.selected)
+                .cloned()
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| right.title.clone());
+            ui.container("right-panel", Role::TabPanel, |ui| {
+                if right.selected == 3 && !right.nested_labels.is_empty() {
+                    ui.container("oracle-tabs", Role::TabList, |ui| {
+                        for (index, label) in right.nested_labels.iter().enumerate() {
+                            ui.node(format!("oracle-{index}"), Role::Tab)
+                                .label(label)
+                                .selected(right.nested_selected == Some(index))
+                                .on_focus(move || Msg::SelectOracle(index))
+                                .on_click(move || Msg::SelectOracle(index));
+                        }
+                    })
+                    .label("Oracles");
+                }
+                ui.list("content", right_title.clone(), |ui| {
+                    for (index, row) in right.rows.iter().enumerate() {
+                        ui.list_item(index.to_string(), row.concat());
+                    }
+                });
+            })
+            .label(right_title)
+            .focused(focused == Some(Id::RightTabs) && right.active.is_some());
+
+            if focused == Some(Id::Input) {
+                ui.text_input("input", input_title, input_value.clone())
+                    .focused(true)
+                    .on_action(Action::SetValue, |request| {
+                        Msg::SetInput(match request.data.as_ref() {
+                            Some(ActionData::Value(value)) => Some(value.to_string()),
+                            _ => None,
+                        })
+                    });
+                ui.button("submit-input", "Submit")
+                    .disabled(!input_valid)
+                    .on_click(move || Msg::Input(input_value.clone()));
+                ui.button("cancel-input", "Cancel")
+                    .on_click(|| Msg::InputCancel);
+            }
+
+            if focused == Some(Id::Popup) {
+                ui.alert("popup", popup_text).description(popup_title);
+                match (popup_labels.as_slice(), popup_action) {
+                    ([label], _) => {
+                        ui.button("popup-ok", label)
+                            .description("Dismiss the alert")
+                            .on_click(|| Msg::PopupOk);
+                    }
+                    ([yes, no], Some(action)) => {
+                        let (yes_description, no_description) = match &action {
+                            ConfirmedAction::Restart => (
+                                "Confirm restarting the debuggee",
+                                "Cancel restarting the debuggee",
+                            ),
+                            ConfirmedAction::RemoveBreakpoint => {
+                                ("Keep the breakpoint", "Remove the breakpoint")
+                            }
+                            ConfirmedAction::RemoveWatchpoint => {
+                                ("Keep the watchpoint", "Remove the watchpoint")
+                            }
+                        };
+                        let no_action = action.clone();
+                        ui.button("popup-yes", yes)
+                            .description(yes_description)
+                            .on_click(move || Msg::PopupYes(action.clone()));
+                        ui.button("popup-no", no)
+                            .description(no_description)
+                            .on_click(move || Msg::PopupNo(no_action.clone()));
+                    }
+                    _ => {}
+                }
+            }
+
+            if debugger_ready {
+                ui.command("run", "Start or restart the debuggee", || Msg::RunDebugee);
+                ui.command("continue", "Continue the debuggee", || Msg::ContinueDebugee);
+                ui.command("step-over", "Step over the current source line", || {
+                    Msg::StepOver
+                });
+                ui.command("step-into", "Step into the current call", || Msg::StepInto);
+                ui.command("step-out", "Step out of the current function", || {
+                    Msg::StepOut
+                });
+            }
+            ui.command("focus-left", "Focus the debugger data panel", || {
+                Msg::LeftTabsInFocus { reset_to: None }
+            });
+            ui.command("focus-right", "Focus the program view panel", || {
+                Msg::RightTabsInFocus { reset_to: None }
+            });
+            ui.command(
+                "expand-left",
+                "Expand or restore the debugger data panel",
+                || Msg::ExpandTab(Id::LeftTabs),
+            );
+            ui.command(
+                "expand-right",
+                "Expand or restore the program view panel",
+                || Msg::ExpandTab(Id::RightTabs),
+            );
+            ui.command("switch-ui", "Switch to the debugger console", || {
+                Msg::SwitchUI
+            });
+            ui.command("quit", "Quit BugStalker", || Msg::AppClose);
         });
     }
 
@@ -277,6 +690,69 @@ impl Model {
                     self.exchanger.send_switch_ui();
                     self.quit = true;
                 }
+                Msg::ContinueDebugee => {
+                    if !self.exchanger.is_messaging_enabled() {
+                        warn!(target: "tui", "try continue but messaging disabled");
+                        return Ok(None);
+                    }
+                    self.exchanger
+                        .request_async(|dbg| Ok(command::r#continue::Handler::new(dbg).handle()?))
+                        .expect("messaging enabled");
+                    self.exchanger.disable_messaging();
+                    return Ok(Some(Msg::AppRunning));
+                }
+                Msg::RunDebugee => {
+                    if !self.exchanger.is_messaging_enabled() {
+                        warn!(target: "tui", "try start/restart but messaging disabled");
+                        return Ok(None);
+                    }
+                    let mb_err = self
+                        .exchanger
+                        .request_sync(|dbg| run::Handler::new(dbg).handle(run::Command::DryStart))
+                        .expect("messaging enabled");
+                    let already_run =
+                        matches!(mb_err.err(), Some(CommandError::Handle(Error::AlreadyRun)));
+                    if already_run {
+                        return Ok(Some(Msg::PopupConfirmDebuggerRestart));
+                    }
+                    self.exchanger
+                        .request_async(
+                            |dbg| Ok(run::Handler::new(dbg).handle(run::Command::Start)?),
+                        )
+                        .expect("messaging enabled");
+                    self.exchanger.disable_messaging();
+                    return Ok(Some(Msg::AppRunning));
+                }
+                Msg::StepOver => {
+                    if !self.exchanger.is_messaging_enabled() {
+                        warn!(target: "tui", "try step-over but messaging disabled");
+                        return Ok(None);
+                    }
+                    self.exchanger
+                        .request_async(|dbg| Ok(command::step_over::Handler::new(dbg).handle()?))
+                        .expect("messaging enabled");
+                    return Ok(Some(Msg::AppRunning));
+                }
+                Msg::StepInto => {
+                    if !self.exchanger.is_messaging_enabled() {
+                        warn!(target: "tui", "try step-into but messaging disabled");
+                        return Ok(None);
+                    }
+                    self.exchanger
+                        .request_async(|dbg| Ok(command::step_into::Handler::new(dbg).handle()?))
+                        .expect("messaging enabled");
+                    return Ok(Some(Msg::AppRunning));
+                }
+                Msg::StepOut => {
+                    if !self.exchanger.is_messaging_enabled() {
+                        warn!(target: "tui", "try step-out but messaging disabled");
+                        return Ok(None);
+                    }
+                    self.exchanger
+                        .request_async(|dbg| Ok(command::step_out::Handler::new(dbg).handle()?))
+                        .expect("messaging enabled");
+                    return Ok(Some(Msg::AppRunning));
+                }
                 Msg::LeftTabsInFocus { reset_to } => {
                     self.app.active(&Id::LeftTabs)?;
                     if let Some(direction) = reset_to {
@@ -308,6 +784,22 @@ impl Model {
                     _ = self
                         .app
                         .attr(&Id::RightTabs, Attribute::Focus, AttrValue::Flag(true));
+                }
+                Msg::SelectTab { tab_id, index } => {
+                    debug_assert!(tab_id == Id::RightTabs || tab_id == Id::LeftTabs);
+                    self.app.active(&tab_id)?;
+                    self.app.attr(
+                        &tab_id,
+                        TabWindow::SELECT_TAB_ATTR,
+                        AttrValue::Payload(PropPayload::One(PropValue::Usize(index))),
+                    )?;
+                }
+                Msg::SelectOracle(index) => {
+                    self.app.attr(
+                        &Id::RightTabs,
+                        TabWindow::SELECT_VISIBLE_TAB_ATTR,
+                        AttrValue::Payload(PropPayload::One(PropValue::Usize(index))),
+                    )?;
                 }
                 Msg::BreakpointAdd(r#type) => {
                     if !self.exchanger.is_messaging_enabled() {
@@ -471,6 +963,11 @@ impl Model {
                         }
                     };
                 }
+                Msg::SetInput(Some(input)) => {
+                    self.app
+                        .attr(&Id::Input, Attribute::Value, AttrValue::String(input))?;
+                }
+                Msg::SetInput(None) => return Ok(None),
                 Msg::InputCancel => {
                     self.app.unlock_subs();
                     self.app.blur()?;
